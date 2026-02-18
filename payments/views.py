@@ -1,18 +1,23 @@
 # payments/views.py
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from decimal import Decimal
 from django.shortcuts import get_object_or_404
+from django.db.models import Q
+from itertools import chain
+from operator import attrgetter
 import uuid
 
-from .models import CryptoOrder
-from .serializers import InitiateTradeSerializer, CryptoOrderSerializer
+from .models import CryptoOrder, Transfer
+from .serializers import InitiateTradeSerializer, CryptoOrderSerializer, UnifiedTransactionSerializer
 from .mpesa import initiate_stk_push
+
+# Notice how it imports from the wallet folder here!
 from wallet.web3_utils import mint_token_to_user 
 
 @api_view(['POST'])
-@permission_classes([AllowAny]) # AllowAny for testing, change to IsAuthenticated in production
+@permission_classes([AllowAny]) 
 def initiate_payment(request):
     """
     Endpoint: /api/payments/pay/
@@ -55,26 +60,39 @@ def initiate_payment(request):
 
     return Response(serializer.errors, status=400)
 
+
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def transaction_history(request):
     """
     Endpoint: /api/payments/history/
+    Returns unified list of M-Pesa deposits and P2P transfers.
     """
     wallet_address = request.query_params.get('wallet_address')
     if not wallet_address:
         return Response({"error": "Wallet address required"}, status=400)
 
-    orders = CryptoOrder.objects.filter(wallet_address=wallet_address).order_by('-created_at')
-    serializer = CryptoOrderSerializer(orders, many=True)
+    orders = CryptoOrder.objects.filter(wallet_address__iexact=wallet_address)
+    
+    transfers = Transfer.objects.filter(
+        Q(from_address__iexact=wallet_address) | Q(to_address__iexact=wallet_address)
+    )
+
+    combined_list = sorted(
+        chain(orders, transfers),
+        key=attrgetter('created_at'),
+        reverse=True
+    )[:50] 
+
+    serializer = UnifiedTransactionSerializer(combined_list, many=True)
     return Response(serializer.data)
+
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def mpesa_callback(request):
     """
     Endpoint: /api/payments/callback/
-    Safaricom calls this. If ResultCode is 0, we mint NIT tokens.
     """
     data = request.data
     try:
@@ -95,7 +113,6 @@ def mpesa_callback(request):
             order.mpesa_receipt = receipt
             order.save()
 
-            # --- MINTING LOGIC ---
             print(f"Minting {order.amount_kes} NIT to {order.wallet_address}")
             tx_hash = mint_token_to_user(order.wallet_address, order.amount_kes)
 

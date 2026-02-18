@@ -4,12 +4,16 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from eth_account import Account
 from web3 import Web3
+from decimal import Decimal  # <-- Added this for database saving
+
 from .serializers import TransferSerializer, WithdrawalSerializer
 
 # Import Logic
 from .web3_utils import get_wallet_balance, transfer_token, return_token_to_admin, w3
 # Import B2C Logic from your Payments App
 from payments.mpesa import initiate_b2c_payment
+# Import the Transfer model so we can save to History <-- Added this
+from payments.models import Transfer 
 
 Account.enable_unaudited_hdwallet_features()
 
@@ -70,10 +74,23 @@ def transfer_funds(request):
         amount = serializer.validated_data['amount']
         p_key = serializer.validated_data['privateKey']
 
+        # Derive the sender's address from the private key
+        sender_account = Account.from_key(p_key)
+        sender_address = sender_account.address
+
         result = transfer_token(p_key, to_addr, float(amount))
         
         if "error" in result:
              return Response({"result": False, "error": result["error"]}, status=400)
+        
+        # 🛑 NEW: SAVE TO DATABASE SO HISTORY TAB CAN SEE IT
+        Transfer.objects.create(
+            from_address=sender_address,
+            to_address=to_addr,
+            amount=Decimal(str(amount)),
+            tx_hash=result["tx_hash"],
+            status='COMPLETED'
+        )
         
         return Response({"result": True, "tx_hash": result["tx_hash"], "message": "Transfer Successful"})
     
@@ -93,6 +110,10 @@ def withdraw_to_mpesa(request):
         amount = serializer.validated_data['amount']
         phone = serializer.validated_data['phone_number']
 
+        # Derive the sender's address from the private key
+        sender_account = Account.from_key(p_key)
+        sender_address = sender_account.address
+
         # 1. Blockchain Transfer (Burn)
         crypto_result = return_token_to_admin(p_key, float(amount))
         if "error" in crypto_result:
@@ -102,6 +123,16 @@ def withdraw_to_mpesa(request):
         try:
             mpesa_resp = initiate_b2c_payment(phone, int(amount))
             if mpesa_resp.get("ResponseCode") == "0":
+                
+                # 🛑 NEW: SAVE TO DATABASE SO HISTORY TAB CAN SEE IT
+                Transfer.objects.create(
+                    from_address=sender_address,
+                    to_address="MPESA_WITHDRAWAL", 
+                    amount=Decimal(str(amount)),
+                    tx_hash=crypto_result['tx_hash'],
+                    status='COMPLETED'
+                )
+
                 return Response({
                     "result": True, 
                     "message": "Withdrawal Successful", 
