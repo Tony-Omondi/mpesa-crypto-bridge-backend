@@ -1,7 +1,7 @@
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.authtoken.models import Token 
+from rest_framework_simplejwt.tokens import RefreshToken # NEW: Import SimpleJWT tokens
 from django.contrib.auth import authenticate
 from .serializers import UserRegistrationSerializer
 
@@ -10,30 +10,33 @@ from .serializers import UserRegistrationSerializer
 def register(request):
     """
     Endpoint: /api/auth/register/
-    Registers a new user and returns an auth token.
+    Registers a new user and returns JWT access and refresh tokens.
     """
     serializer = UserRegistrationSerializer(data=request.data)
     
     if serializer.is_valid():
         user = serializer.save()
-        # Create a Token immediately so they are logged in
-        token, _ = Token.objects.get_or_create(user=user)
+        
+        # NEW: Generate JWT Tokens for the new user
+        refresh = RefreshToken.for_user(user)
         
         return Response({
             "status": "Account Created",
-            "token": token.key, 
+            "refresh": str(refresh),                  # NEW: The refresh token
+            "access": str(refresh.access_token),      # NEW: The short-lived access token
             "user_id": user.pk,
             "wallet": user.wallet_address
         })
         
     return Response(serializer.errors, status=400)
 
+
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def login(request):
     """
     Endpoint: /api/auth/login/
-    Authenticates user via phone number and password.
+    Authenticates user via phone number and password, returning JWT tokens.
     """
     phone = request.data.get('username') 
     password = request.data.get('password')
@@ -43,13 +46,16 @@ def login(request):
     if not user:
         return Response({"error": "Invalid Credentials"}, status=400)
         
-    token, _ = Token.objects.get_or_create(user=user)
+    # NEW: Generate JWT Tokens for the logged-in user
+    refresh = RefreshToken.for_user(user)
     
     return Response({
-        "token": token.key, 
+        "refresh": str(refresh),                  # NEW: The refresh token
+        "access": str(refresh.access_token),      # NEW: The short-lived access token
         "user_id": user.pk,
         "wallet_address": user.wallet_address
     })
+
 
 @api_view(['PATCH'])
 @permission_classes([IsAuthenticated])
