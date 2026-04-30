@@ -1,6 +1,6 @@
 # payments/views.py
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from decimal import Decimal
 from django.shortcuts import get_object_or_404
@@ -12,12 +12,11 @@ import uuid
 from .models import CryptoOrder, Transfer
 from .serializers import InitiateTradeSerializer, CryptoOrderSerializer, UnifiedTransactionSerializer
 from .mpesa import initiate_stk_push
+from .tasks import process_mint
 
-# Notice how it imports from the wallet folder here!
-from wallet.web3_utils import mint_token_to_user 
 
 @api_view(['POST'])
-@permission_classes([AllowAny]) 
+@permission_classes([IsAuthenticated])  # 🔒 Locked
 def initiate_payment(request):
     """
     Endpoint: /api/payments/pay/
@@ -26,16 +25,16 @@ def initiate_payment(request):
     serializer = InitiateTradeSerializer(data=request.data)
     if serializer.is_valid():
         amount_kes = serializer.validated_data['amount_kes']
-        exchange_rate = Decimal("1.00") 
+        exchange_rate = Decimal("1.00")
         amount_nit = Decimal(amount_kes) / exchange_rate
-        
+
         temp_id = f"TEMP_{uuid.uuid4()}"
 
         order = CryptoOrder.objects.create(
             phone_number=serializer.validated_data['phone_number'],
             wallet_address=serializer.validated_data['wallet_address'],
             amount_kes=amount_kes,
-            amount_eth=amount_nit, 
+            amount_eth=amount_nit,
             exchange_rate=exchange_rate,
             checkout_request_id=temp_id
         )
@@ -62,7 +61,7 @@ def initiate_payment(request):
 
 
 @api_view(['GET'])
-@permission_classes([AllowAny])
+@permission_classes([AllowAny])  # 🔒 Locked
 def transaction_history(request):
     """
     Endpoint: /api/payments/history/
@@ -73,7 +72,7 @@ def transaction_history(request):
         return Response({"error": "Wallet address required"}, status=400)
 
     orders = CryptoOrder.objects.filter(wallet_address__iexact=wallet_address)
-    
+
     transfers = Transfer.objects.filter(
         Q(from_address__iexact=wallet_address) | Q(to_address__iexact=wallet_address)
     )
@@ -82,17 +81,38 @@ def transaction_history(request):
         chain(orders, transfers),
         key=attrgetter('created_at'),
         reverse=True
-    )[:50] 
+    )[:50]
 
     serializer = UnifiedTransactionSerializer(combined_list, many=True)
     return Response(serializer.data)
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])  # 🔒 Locked
+def payment_status(request, order_id):
+    """
+    Endpoint: /api/payments/status/<order_id>/
+    Frontend polls this to check if mint completed after STK push.
+    """
+    try:
+        order = CryptoOrder.objects.get(id=order_id)
+        return Response({
+            "order_id": order.id,
+            "status": order.status,
+            "amount_kes": str(order.amount_kes),
+            "tx_hash": order.tx_hash,
+            "mpesa_receipt": order.mpesa_receipt,
+        })
+    except CryptoOrder.DoesNotExist:
+        return Response({"error": "Order not found"}, status=404)
+
+
 @api_view(['POST'])
-@permission_classes([AllowAny])
+@permission_classes([AllowAny])  # ✅ Must stay open — Safaricom hits this without a token
 def mpesa_callback(request):
     """
     Endpoint: /api/payments/callback/
+    Marks order as PAID then hands off minting to Celery — returns fast ⚡
     """
     data = request.data
     try:
@@ -113,19 +133,8 @@ def mpesa_callback(request):
             order.mpesa_receipt = receipt
             order.save()
 
-            print(f"Minting {order.amount_kes} NIT to {order.wallet_address}")
-            tx_hash = mint_token_to_user(order.wallet_address, order.amount_kes)
+            process_mint.delay(order.id)
 
-            if tx_hash:
-                order.status = 'COMPLETED'
-                order.tx_hash = tx_hash
-                print(f"Mint Success: {tx_hash}")
-            else:
-                order.status = 'PAID_BUT_FAILED'
-                order.error_message = "Blockchain Minting Error"
-                print("Mint Failed")
-            
-            order.save()
         else:
             order.status = 'FAILED'
             order.error_message = stk_callback.get('ResultDesc', 'User Cancelled')
@@ -133,5 +142,5 @@ def mpesa_callback(request):
 
     except Exception as e:
         print(f"Callback Error: {e}")
-        
+
     return Response({"status": "Received"})
