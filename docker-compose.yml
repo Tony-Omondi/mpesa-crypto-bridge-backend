@@ -1,3 +1,4 @@
+
 services:
 
   # ─── PostgreSQL Database ─────────────────────────────────────────
@@ -37,7 +38,7 @@ services:
     command: >
       sh -c "python manage.py migrate &&
              python manage.py collectstatic --noinput &&
-             gunicorn core.wsgi:application --bind 0.0.0.0:8000 --workers 3"
+             gunicorn core.wsgi:application --bind 0.0.0.0:8000 --workers 3 --worker-class gevent --timeout 120"
     volumes:
       - .:/app
       - static_volume:/app/staticfiles
@@ -65,6 +66,21 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+
+  # ─── Celery Flower (Task Monitoring Dashboard) ───────────────────
+  flower:
+    build: .
+    restart: always
+    command: celery -A core flower --port=5555 --basic_auth=${FLOWER_USER:-admin}:${FLOWER_PASSWORD:-nitowallet123}
+    volumes:
+      - .:/app
+    ports:
+      - "5555:5555"
+    env_file:
+      - .env
+    depends_on:
+      - redis
+      - celery
 
 volumes:
   postgres_data:

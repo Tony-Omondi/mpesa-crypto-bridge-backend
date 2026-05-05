@@ -52,3 +52,5 @@ celery[redis]
 redis
 gunicorn
 whitenoise
+gevent
+flower
