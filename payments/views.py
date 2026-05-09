@@ -3,7 +3,11 @@
 from rest_framework.decorators import api_view, permission_classes, throttle_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+<<<<<<< HEAD
 from rest_framework.throttling import AnonRateThrottle
+=======
+from rest_framework import status
+>>>>>>> 749280a (yyy)
 from decimal import Decimal
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
